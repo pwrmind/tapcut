@@ -1,4 +1,4 @@
-# TapCut – AI UI Layer Extractor
+# ✂️ TapCut – AI UI Layer Extractor
 
 Инструмент для интерактивного вырезания объектов из скриншотов интерфейсов с помощью **Segment Anything Model 2 (SAM 2)** и последующего восстановления фона через inpainting.
 

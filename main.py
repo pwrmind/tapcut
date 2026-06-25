@@ -19,6 +19,7 @@ try:
 except ImportError:
     SimpleLama = None
 
+
 class ClickableScene(QGraphicsScene):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -34,6 +35,7 @@ class ClickableScene(QGraphicsScene):
             if 0 <= x < rect.width() and 0 <= y < rect.height():
                 self.parent_editor.handle_click(x, y)
 
+
 class AILayerExtractor(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -46,12 +48,8 @@ class AILayerExtractor(QMainWindow):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Инициализация SAM 2
-       # Инициализация SAM 2
         try:
-            # Получаем абсолютный путь к текущей папке проекта
             base_dir = os.path.dirname(os.path.abspath(__file__))
-            
-            # Строим абсолютные пути к файлам конфигурации и весов
             model_cfg = os.path.join(base_dir, "models", "sam2-hiera-tiny", "sam2_hiera_t.yaml")
             checkpoint = os.path.join(base_dir, "models", "sam2-hiera-tiny", "sam2_hiera_tiny.pt")
             
@@ -70,7 +68,7 @@ class AILayerExtractor(QMainWindow):
         if SimpleLama is not None:
             try:
                 self.lama = SimpleLama()
-                print("Модель LaMa Inpainting успешно готова к работе.")
+                print("Модель LaMa Inpainting успешно загружена.")
             except Exception as e:
                 print(f"Не удалось запустить LaMa: {e}")
 
@@ -128,21 +126,23 @@ class AILayerExtractor(QMainWindow):
 
     def open_image(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Выберите скриншот", "", "Images (*.png *.jpg *.jpeg)")
-        if file_path:
-            self.scene_editor.clear()
-            self.scene_result.clear()
+        if not file_path:
+            return
             
-            self.cv_orig_image = cv2.imread(file_path)
-            pixmap = QPixmap(file_path)
-            self.scene_editor.image_item = self.scene_editor.addPixmap(pixmap)
-            
-            if self.predictor:
-                rgb_image = cv2.cvtColor(self.cv_orig_image, cv2.COLOR_BGR2RGB)
-                self.predictor.set_image(rgb_image)
-            
-            self.btn_extract.setEnabled(False)
-            self.btn_save.setEnabled(False)
-            self.tabs.setCurrentIndex(0)
+        self.scene_editor.clear()
+        self.scene_result.clear()
+        
+        self.cv_orig_image = cv2.imread(file_path)
+        pixmap = QPixmap(file_path)
+        self.scene_editor.image_item = self.scene_editor.addPixmap(pixmap)
+        
+        if self.predictor:
+            rgb_image = cv2.cvtColor(self.cv_orig_image, cv2.COLOR_BGR2RGB)
+            self.predictor.set_image(rgb_image)
+        
+        self.btn_extract.setEnabled(False)
+        self.btn_save.setEnabled(False)
+        self.tabs.setCurrentIndex(0)
 
     def handle_click(self, x, y):
         if self.cv_orig_image is None:
@@ -160,7 +160,7 @@ class AILayerExtractor(QMainWindow):
                     point_labels=input_label,
                     multimask_output=False
                 )
-            self.current_mask = masks[0]
+            self.current_mask = masks[0].astype(bool)  # сразу приводим к bool
         else:
             self.current_mask = np.zeros((h, w), dtype=bool)
             self.current_mask[max(0, y-50):min(h, y+50), max(0, x-70):min(w, x+70)] = True
@@ -173,26 +173,25 @@ class AILayerExtractor(QMainWindow):
             self.scene_editor.removeItem(self.scene_editor.mask_item)
             
         h, w = self.current_mask.shape
-        overlay_img = QImage(w, h, QImage.Format.Format_ARGB32)
-        overlay_img.fill(QColor(0, 0, 0, 0))
+        mask_bool = self.current_mask.astype(bool)  # на всякий случай, если ещё не bool
         
-        for y in range(h):
-            for x in range(w):
-                if self.current_mask[y, x]:
-                    overlay_img.setPixelColor(x, y, QColor(0, 255, 150, 130))
-                    
-        mask_pixmap = QPixmap.fromImage(overlay_img)
-        self.scene_editor.mask_item = self.scene_editor.addPixmap(mask_pixmap)
+        # Быстрая NumPy-генерация полупрозрачного зелёного слоя
+        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+        overlay[mask_bool] = [0, 255, 150, 130]  # RGBA
+        
+        qimg = QImage(overlay.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+        self.scene_editor.mask_item = self.scene_editor.addPixmap(QPixmap.fromImage(qimg))
 
     def extract_object(self):
         if self.current_mask is None or self.cv_orig_image is None:
             return
             
         h, w, _ = self.cv_orig_image.shape
+        mask_bool = self.current_mask.astype(bool)  # гарантируем bool
         
         # Шаг 1: Вырезание PNG слоя с альфа-каналом прозрачности
         rgba_image = cv2.cvtColor(self.cv_orig_image, cv2.COLOR_BGR2BGRA)
-        rgba_image[~self.current_mask] = [0, 0, 0, 0]
+        rgba_image[~mask_bool] = [0, 0, 0, 0]
         
         bytes_per_line = 4 * w
         self.extracted_qimage = QImage(rgba_image.data, w, h, bytes_per_line, QImage.Format.Format_RGBA8888).copy()
@@ -201,20 +200,25 @@ class AILayerExtractor(QMainWindow):
         self.scene_result.addPixmap(QPixmap.fromImage(self.extracted_qimage))
         
         # Шаг 2: Дорисовка фона (Inpainting)
-        inpainting_mask = (self.current_mask.astype(np.uint8)) * 255
+        inpainting_mask = mask_bool.astype(np.uint8) * 255
         
+        # Проверяем выбранный метод
         if self.radio_opencv.isChecked():
             inpainted_bgr = cv2.inpaint(self.cv_orig_image, inpainting_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
-        else:
+        elif self.radio_lama.isChecked() and self.lama is not None:
             img_rgb = cv2.cvtColor(self.cv_orig_image, cv2.COLOR_BGR2RGB)
             pil_img = Image.fromarray(img_rgb)
             pil_mask = Image.fromarray(inpainting_mask)
             
             result_pil = self.lama(pil_img, pil_mask)
             inpainted_bgr = cv2.cvtColor(np.array(result_pil), cv2.COLOR_RGB2BGR)
+        else:
+            # Fallback: если LaMa не загружена, а кнопка активна (маловероятно, но всё же)
+            QMessageBox.warning(self, "Ошибка", "Модель LaMa недоступна, используется OpenCV.")
+            inpainted_bgr = cv2.inpaint(self.cv_orig_image, inpainting_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
 
+        # Обновляем исходное изображение и сцену редактора
         self.cv_orig_image = inpainted_bgr
-        
         rgb_for_ui = cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB)
         bytes_per_line_rgb = 3 * w
         updated_qimage = QImage(rgb_for_ui.data, w, h, bytes_per_line_rgb, QImage.Format.Format_RGB888)
@@ -223,6 +227,7 @@ class AILayerExtractor(QMainWindow):
         if self.predictor:
             self.predictor.set_image(rgb_for_ui)
 
+        # Убираем маску
         if self.scene_editor.mask_item:
             self.scene_editor.removeItem(self.scene_editor.mask_item)
             self.scene_editor.mask_item = None
@@ -237,6 +242,7 @@ class AILayerExtractor(QMainWindow):
         file_path, _ = QFileDialog.getSaveFileName(self, "Сохранить слой", "layer.png", "PNG Image (*.png)")
         if file_path:
             self.extracted_qimage.save(file_path, "PNG")
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
